@@ -57,6 +57,16 @@ def init_db():
         c.execute("""CREATE TABLE IF NOT EXISTS users(
             email TEXT PRIMARY KEY, name TEXT, role TEXT DEFAULT 'user',
             active INTEGER DEFAULT 1, added_by TEXT, created_at TEXT, last_login TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS pipeline(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            opp_code TEXT, account TEXT, title TEXT, stage TEXT,
+            ecosystem TEXT, offerings TEXT, eu_tcv REAL DEFAULT 0,
+            excalibur_tcv REAL DEFAULT 0, opp_type TEXT, region TEXT,
+            country TEXT, service_line TEXT, practice TEXT,
+            account_manager TEXT, mode TEXT, l1 TEXT, l2 TEXT, l3 TEXT,
+            closing_month TEXT, created_month TEXT, vertical TEXT,
+            sub_vertical TEXT, geo TEXT,
+            uploaded_at TEXT, uploaded_by TEXT)""")
         # seed the super admin
         if SUPERADMIN_EMAIL:
             row = c.execute("SELECT email FROM users WHERE email=?", (SUPERADMIN_EMAIL,)).fetchone()
@@ -206,6 +216,101 @@ def parse_user_csv(text, requester_role, actor):
     log(actor, "users_bulk_upload", f'added={out["added"]} updated={out["updated"]} skipped={len(out["skipped"])}')
     return out
 
+def _parse_excel_pipeline(raw_bytes):
+    """Parse an xlsx file and return rows where Ecosystem Unit == 'Anthropic'."""
+    import zipfile, xml.etree.ElementTree as ET, re, io, base64
+    NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+
+    def col_idx(ref):
+        r = 0
+        for ch in re.match(r'([A-Z]+)', ref).group(1):
+            r = r * 26 + (ord(ch) - 64)
+        return r - 1
+
+    z = zipfile.ZipFile(io.BytesIO(raw_bytes))
+    ss = ET.fromstring(z.read('xl/sharedStrings.xml'))
+    strings = [''.join(t.text or '' for t in si.findall(f'.//{{{NS}}}t'))
+               for si in ss.findall(f'{{{NS}}}si')]
+
+    sheet = ET.fromstring(z.read('xl/worksheets/sheet1.xml'))
+
+    def read_row(row_el):
+        cells = {}
+        for c in row_el.findall(f'{{{NS}}}c'):
+            idx = col_idx(c.get('r', 'A1'))
+            t = c.get('t', '')
+            v = c.find(f'{{{NS}}}v')
+            if t == 's' and v is not None and v.text:
+                cells[idx] = strings[int(v.text)]
+            elif v is not None:
+                cells[idx] = v.text or ''
+            else:
+                cells[idx] = ''
+        return cells
+
+    rows = sheet.findall(f'{{{NS}}}sheetData/{{{NS}}}row')
+    if not rows:
+        return []
+
+    hdr = read_row(rows[0])
+    header = [hdr.get(i, '') for i in range(max(hdr.keys(), default=0) + 1)]
+
+    def idx(name):
+        try: return header.index(name)
+        except ValueError: return -1
+
+    col = {
+        'opp_code':      idx('Opportunity Code'),
+        'account':       idx('Account'),
+        'title':         idx('Opportunity Title'),
+        'stage':         idx('Stage'),
+        'ecosystem':     idx('Ecosystem Unit'),
+        'offerings':     idx('EU Offerings'),
+        'eu_tcv':        idx('EU TCV ($M)'),
+        'excalibur_tcv': idx('Excalibur TCV($M)'),
+        'opp_type':      idx('Opportunity Type'),
+        'region':        idx('Region'),
+        'country':       idx('Country'),
+        'service_line':  idx('Service Line'),
+        'practice':      idx('Practice'),
+        'account_manager': idx('Account Manager'),
+        'mode':          idx('Mode'),
+        'l1':            idx('L1'),
+        'l2':            idx('L2'),
+        'l3':            idx('L3'),
+        'closing_month': idx('Closing Month'),
+        'created_month': idx('Created Month'),
+        'vertical':      idx('Vertical'),
+        'sub_vertical':  idx('Sub Vertical'),
+        'geo':           idx('Geo'),
+    }
+
+    results = []
+    for row_el in rows[1:]:
+        r = read_row(row_el)
+        g = lambda k: r.get(col[k], '') if col[k] >= 0 else ''
+        if g('ecosystem').strip().lower() != 'anthropic':
+            continue
+        try: eu_tcv = float(g('eu_tcv') or 0)
+        except: eu_tcv = 0.0
+        try: exc_tcv = float(g('excalibur_tcv') or 0)
+        except: exc_tcv = 0.0
+        results.append({
+            'opp_code': g('opp_code'), 'account': g('account'),
+            'title': g('title'), 'stage': g('stage'),
+            'ecosystem': g('ecosystem'), 'offerings': g('offerings'),
+            'eu_tcv': eu_tcv, 'excalibur_tcv': exc_tcv,
+            'opp_type': g('opp_type'), 'region': g('region'),
+            'country': g('country'), 'service_line': g('service_line'),
+            'practice': g('practice'), 'account_manager': g('account_manager'),
+            'mode': g('mode'), 'l1': g('l1'), 'l2': g('l2'), 'l3': g('l3'),
+            'closing_month': g('closing_month'), 'created_month': g('created_month'),
+            'vertical': g('vertical'), 'sub_vertical': g('sub_vertical'),
+            'geo': g('geo'),
+        })
+    return results
+
+
 def forward_webhook(payload):
     if not WEBHOOK:
         return None
@@ -350,6 +455,19 @@ class H(BaseHTTPRequestHandler):
             with db() as c:
                 rows = c.execute("SELECT * FROM activity ORDER BY id DESC LIMIT 25").fetchall()
             return self._send(200, [dict(r) for r in rows])
+        if p == "/api/pipeline/stats":
+            with db() as c:
+                rows = c.execute("SELECT stage, COUNT(*) n, COALESCE(SUM(eu_tcv),0) tcv FROM pipeline GROUP BY stage").fetchall()
+            total = sum(r["n"] for r in rows)
+            tcv = sum(r["tcv"] for r in rows)
+            by_stage = {r["stage"]: r["n"] for r in rows}
+            active = sum(v for k, v in by_stage.items() if k in ("L1","L2","L3","L4"))
+            early = by_stage.get("P0", 0)
+            return self._send(200, {"total": total, "tcv": tcv, "active": active, "early": early, "by_stage": by_stage})
+        if p == "/api/pipeline":
+            with db() as c:
+                rows = c.execute("SELECT * FROM pipeline ORDER BY eu_tcv DESC").fetchall()
+            return self._send(200, [dict(r) for r in rows])
         if p == "/api/users/template.csv":
             if not self._require_admin():
                 return
@@ -390,6 +508,38 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie", f"euler_sess={tok}; Path=/; HttpOnly; SameSite=Lax")
             self.end_headers()
             return self.wfile.write(body)
+        if p == "/api/pipeline/upload":
+            me = self._require_admin("superadmin")
+            if not me:
+                return
+            file_b64 = b.get("file", "")
+            if not file_b64:
+                return self._send(400, {"error": "No file provided"})
+            try:
+                import base64
+                raw = base64.b64decode(file_b64)
+                rows = _parse_excel_pipeline(raw)
+                if not rows:
+                    return self._send(400, {"error": "No Anthropic-tagged rows found in this file"})
+                ts = now()
+                with db() as c:
+                    c.execute("DELETE FROM pipeline")
+                    for r in rows:
+                        c.execute("""INSERT INTO pipeline(opp_code,account,title,stage,ecosystem,
+                            offerings,eu_tcv,excalibur_tcv,opp_type,region,country,service_line,
+                            practice,account_manager,mode,l1,l2,l3,closing_month,created_month,
+                            vertical,sub_vertical,geo,uploaded_at,uploaded_by)
+                            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (r['opp_code'],r['account'],r['title'],r['stage'],r['ecosystem'],
+                             r['offerings'],r['eu_tcv'],r['excalibur_tcv'],r['opp_type'],
+                             r['region'],r['country'],r['service_line'],r['practice'],
+                             r['account_manager'],r['mode'],r['l1'],r['l2'],r['l3'],
+                             r['closing_month'],r['created_month'],r['vertical'],
+                             r['sub_vertical'],r['geo'],ts,me["email"]))
+                log(me["email"], "pipeline_uploaded", f"{len(rows)} Anthropic opportunities loaded")
+                return self._send(200, {"ok": True, "count": len(rows), "uploaded_at": ts})
+            except Exception as e:
+                return self._send(400, {"error": f"Failed to parse Excel: {str(e)}"})
         if p == "/api/users/bulk":
             me = self._require_admin()
             if not me:

@@ -240,6 +240,7 @@ tr.prow:hover{background:var(--ivory);cursor:pointer}
       <div class="nav-item" data-nav="content"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="3" width="16" height="18" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M8 8h8M8 12h8M8 16h5" stroke="currentColor" stroke-width="1.6"/></svg>Content</div>
       <div class="nav-item" data-nav="tasks"><svg viewBox="0 0 24 24" fill="none"><path d="M9 11l2 2 4-4M4 4h16v16H4z" stroke="currentColor" stroke-width="1.6"/></svg>Tasks</div>
       <div class="nav-item active" data-nav="services"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/></svg>Services</div>
+      <div class="nav-item" data-nav="pipeline"><svg viewBox="0 0 24 24" fill="none"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Pipeline</div>
       <div class="nav-item" data-nav="flows"><svg viewBox="0 0 24 24" fill="none"><path d="M5 6h6M5 12h14M5 18h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Flows</div>
       <div class="nav-item" data-nav="incentive"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2v20M5 7h9a3 3 0 010 6H7a3 3 0 000 6h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Incentive Plan</div>
       <div class="nav-item" data-nav="agreements"><svg viewBox="0 0 24 24" fill="none"><path d="M7 3h7l5 5v13H7z" stroke="currentColor" stroke-width="1.6"/><path d="M9 13l2 2 4-4" stroke="currentColor" stroke-width="1.6"/></svg>Agreements</div>
@@ -305,6 +306,33 @@ tr.prow:hover{background:var(--ivory);cursor:pointer}
 
       <!-- ===== PROJECT DETAIL ===== -->
       <div id="detailView" class="hide"></div>
+
+      <!-- ===== PIPELINE ===== -->
+      <div id="pipelineView" class="hide">
+        <div class="page-head">
+          <div><h1>Anthropic Pipeline</h1><p>Ecosystem-tagged opportunities from the HCLTech pipeline report.</p></div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span id="pipelineUploadedAt" style="font-size:12px;color:var(--slate)"></span>
+            <button class="btn btn-dark hide" id="uploadPipelineBtn">⬆ Upload Excel</button>
+            <input type="file" id="pipelineFileInput" accept=".xlsx" style="display:none">
+          </div>
+        </div>
+        <div class="stats" id="pipelineStats"></div>
+        <div class="tabs" id="pipelineTabs">
+          <div class="tab active" data-ptab="all">All</div>
+          <div class="tab" data-ptab="P0">P0</div>
+          <div class="tab" data-ptab="L3">L3</div>
+          <div class="tab" data-ptab="L4">L4</div>
+        </div>
+        <div class="table-wrap">
+          <div class="table-top"><span id="pipelineCount">Viewing 0 of 0</span></div>
+          <table>
+            <thead><tr><th>Opp Code</th><th>Account</th><th>Title</th><th>Stage</th><th>EU TCV ($M)</th><th>Vertical</th><th>Account Manager</th><th>Closing</th></tr></thead>
+            <tbody id="pipelineRows"></tbody>
+          </table>
+          <div class="empty hide" id="pipelineEmpty">No pipeline data yet. Upload a Tagged Pipeline Report Excel file.</div>
+        </div>
+      </div>
 
       <!-- ===== generic placeholder for other nav ===== -->
       <div id="placeholderView" class="hide"></div>
@@ -450,15 +478,80 @@ async function initAuth(){
 initAuth();
 
 /* ============================ NAV ============================ */
+function hideAllViews(){
+  ['servicesView','pipelineView','placeholderView'].forEach(id=>$('#'+id).classList.add('hide'));
+  $('#detailView').classList.add('hide');
+}
 document.querySelectorAll('.nav-item').forEach(n=>n.onclick=()=>{
   document.querySelectorAll('.nav-item').forEach(x=>x.classList.remove('active'));n.classList.add('active');
   const v=n.dataset.nav;
-  $('#detailView').classList.add('hide');
-  if(v==='services'){$('#servicesView').classList.remove('hide');$('#placeholderView').classList.add('hide');}
-  else if(v==='admin'){$('#servicesView').classList.add('hide');$('#placeholderView').classList.remove('hide');renderAdmin();}
-  else{$('#servicesView').classList.add('hide');$('#placeholderView').classList.remove('hide');
-    $('#placeholderView').innerHTML=`<div class="page-head"><div><h1>${n.textContent.trim()}</h1><p>This module is part of the EULER Partner Portal.</p></div></div><div class="card"><div class="empty">“${n.textContent.trim()}” — placeholder view. The Deal Desk intake lives under <b>Services → New Project</b>.</div></div>`;}
+  hideAllViews();
+  if(v==='services'){$('#servicesView').classList.remove('hide');}
+  else if(v==='pipeline'){$('#pipelineView').classList.remove('hide');loadPipeline();}
+  else if(v==='admin'){$('#placeholderView').classList.remove('hide');renderAdmin();}
+  else{$('#placeholderView').classList.remove('hide');
+    $('#placeholderView').innerHTML=`<div class=”page-head”><div><h1>${n.textContent.trim()}</h1><p>This module is part of the EULER Partner Portal.</p></div></div><div class=”card”><div class=”empty”>”${n.textContent.trim()}” — placeholder view. The Deal Desk intake lives under <b>Services → New Project</b>.</div></div>`;}
 });
+
+/* ============================ PIPELINE ============================ */
+let PIPELINE=[], PTAB='all';
+async function loadPipeline(){
+  try{
+    const [rows, s] = await Promise.all([api('GET','/api/pipeline'), api('GET','/api/pipeline/stats')]);
+    PIPELINE=rows;
+    const isSA = USER && USER.role==='superadmin';
+    $('#uploadPipelineBtn').classList.toggle('hide', !isSA);
+    $('#pipelineStats').innerHTML=`
+      <div class=”stat”><div class=”lbl”>Total Opportunities</div><div class=”val”>${s.total}</div><div class=”sub”>Anthropic tagged</div></div>
+      <div class=”stat”><div class=”lbl”>Total EU TCV</div><div class=”val”>$${s.tcv.toFixed(1)}M</div><div class=”sub”>pipeline value</div></div>
+      <div class=”stat”><div class=”lbl”>Active Pipeline</div><div class=”val”>${s.active}</div><div class=”sub”>L1–L4 stage</div></div>
+      <div class=”stat”><div class=”lbl”>Early Stage</div><div class=”val”>${s.early}</div><div class=”sub”>P0 prospects</div></div>`;
+    if(rows.length){
+      const latest=rows[0].uploaded_at||'';
+      $('#pipelineUploadedAt').textContent=latest?'Last updated: '+latest.replace('T',' ').replace('Z','') + ' UTC':'';
+    }
+    renderPipelineRows();
+  }catch(e){console.error('Pipeline load error',e);}
+}
+function renderPipelineRows(){
+  const rows=PTAB==='all'?PIPELINE:PIPELINE.filter(p=>p.stage===PTAB);
+  const tb=$('#pipelineRows'); tb.innerHTML='';
+  $('#pipelineEmpty').classList.toggle('hide', rows.length>0);
+  $('#pipelineCount').textContent=`Viewing ${rows.length} of ${PIPELINE.length}`;
+  const stageColor={'P0':'b-new','L1':'b-prog','L2':'b-prog','L3':'b-prog','L4':'b-done'};
+  rows.forEach(p=>{
+    const cls=stageColor[p.stage]||'b-new';
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><code style=”font-size:11px”>${p.opp_code||'—'}</code></td>
+      <td><b>${p.account||'—'}</b></td>
+      <td style=”max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis” title=”${(p.title||'').replace(/”/g,'')}”>${p.title||'—'}</td>
+      <td><span class=”badge ${cls}”>${p.stage||'—'}</span></td>
+      <td><b>$${(p.eu_tcv||0).toFixed(2)}M</b></td>
+      <td style=”font-size:12px”>${p.vertical||'—'}</td>
+      <td style=”font-size:12px”>${p.account_manager||'—'}</td>
+      <td style=”font-size:12px”>${p.closing_month||'—'}</td>`;
+    tb.appendChild(tr);
+  });
+}
+document.querySelectorAll('#pipelineTabs .tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('#pipelineTabs .tab').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active'); PTAB=t.dataset.ptab; renderPipelineRows();
+});
+$('#uploadPipelineBtn').onclick=()=>$('#pipelineFileInput').click();
+$('#pipelineFileInput').onchange=async(e)=>{
+  const file=e.target.files[0]; if(!file) return;
+  const btn=$('#uploadPipelineBtn');
+  btn.disabled=true; btn.textContent='Uploading…';
+  try{
+    const b64=await new Promise((res,rej)=>{
+      const r=new FileReader(); r.onload=()=>res(r.result.split(',')[1]); r.onerror=rej; r.readAsDataURL(file);
+    });
+    const data=await api('POST','/api/pipeline/upload',{file:b64});
+    toast('Pipeline updated',`${data.count} Anthropic opportunities loaded`);
+    loadPipeline();
+  }catch(err){toast('Upload failed',String(err));}
+  finally{btn.disabled=false; btn.textContent='⬆ Upload Excel'; e.target.value='';}
+};
 
 /* ============================ PROJECTS LIST ============================ */
 async function loadStats(){
